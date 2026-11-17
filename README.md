@@ -11,8 +11,11 @@ npm install && npm run dev
 3. Copiar `.env.example` para `.env` com URL e chave publishable.
 Sem estas variáveis o jogo funciona só com guardado local.
 
-## Deploy
-Importar o repositório na Vercel (Vite, build `npm run build`, output `dist`) e definir as duas variáveis de ambiente.
+## Deploy (GitHub Pages)
+1. Criar repositório no GitHub e fazer push (branch `main` ou `master`).
+2. Settings → Pages → Source: **GitHub Actions**.
+3. Settings → Secrets and variables → Actions → criar `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` (opcional; sem elas o jogo guarda só localmente).
+4. Cada push publica automaticamente em `https://UTILIZADOR.github.io/NOME-DO-REPO/`.
 
 ## Conteúdos
 Edita `src/data/content.ts` para acrescentar perguntas, eventos, figuras e cenários.

@@ -38,3 +38,5 @@ blockquote{background:#fff;border-left:10px solid var(--y);margin:12px 0;padding
 .ind{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:10px 0}
 .mapa{margin:10px 0}.big{font-size:42px;font-weight:900}
 .rank{padding:0}.rank li{display:flex;justify-content:space-between;background:#fff;border:2px solid var(--k);padding:8px 12px;margin:6px 0;list-style:none}.rank li.eu{background:var(--y)}
+
+.tab{border-collapse:collapse;width:100%;background:#fff;font-size:14px}.tab th,.tab td{border:1px solid var(--k);padding:6px 8px;text-align:left}.tab th{background:var(--y)}

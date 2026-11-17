@@ -4,25 +4,52 @@ import {
   AULAS, QUESTOES, EVENTOS, PISTAS, MOVIMENTOS, CASOS, CENARIOS, DIMENSOES,
   type Q, type Aula, type Dim, type Efeito, type Mov,
 } from "./data/content";
-import { load, persist, registar, sync, logAnswer, ranking, teacherStats, totalPts, radar, streak, sb, type Save, type Linha } from "./lib/store";
+import { load, blank, persist, sync, eventosDe, enviarEventos, loadAuth, saveAuth, loginAluno, iniciarSessao, ping, terminarSessao, ranking, docente, fmtTempo, registar, totalPts, radar, streak, sb, type Save, type Linha, type Auth, type AlunoRow, type Evento } from "./lib/store";
 import "./styles.css";
 
-type Tela = "home" | "quiz" | "tempo" | "assoc" | "visual" | "sim" | "teste" | "perfil" | "rank" | "docente";
+type Tela = "home" | "quiz" | "tempo" | "assoc" | "visual" | "sim" | "teste" | "perfil" | "rank";
 const shuffle = <T,>(a: T[]) => [...a].sort(() => Math.random() - 0.5);
 
 export default function App() {
   const [s, setS] = useState<Save>(load);
+  const ref = useRef(s);
+  const [auth, setAuth] = useState<Auth | null>(() => (sb ? loadAuth() : null));
+  const [codigo, setCodigo] = useState<string | null>(null); // docente autenticado (só em memória)
   const [tela, setTela] = useState<Tela>("home");
-  const upd = (fn: (x: Save) => Save) => setS((p) => { const n = fn(p); persist(n); sync(n); return n; });
-  useEffect(() => { persist(s); }, [s]);
+  const lastAct = useRef(Date.now());
 
-  if (!s.nick) return <Entrada onOk={(nick) => upd((x) => ({ ...x, nick }))} />;
+  const substituir = (n: Save) => { ref.current = n; setS(n); persist(n); };
+  const upd = (fn: (x: Save) => Save) => {
+    const p = ref.current, n = fn(p);
+    substituir(n); sync(n); enviarEventos(eventosDe(p, n));
+  };
+  const sair = () => { terminarSessao(); saveAuth(null); setAuth(null); substituir(blank()); setTela("home"); };
+
+  // sessão (tempo ativo): conta só com o separador visível e com interação nos últimos 2 min
+  useEffect(() => {
+    if (!sb || !auth) return;
+    let vivo = true;
+    iniciarSessao(auth).then((ok) => { if (vivo && !ok) sair(); });
+    const act = () => { lastAct.current = Date.now(); };
+    const ev = ["pointerdown", "keydown", "touchstart", "scroll"];
+    ev.forEach((e) => window.addEventListener(e, act, { passive: true }));
+    const iv = setInterval(() => { if (document.visibilityState === "visible" && Date.now() - lastAct.current < 120000) ping(30); }, 30000);
+    return () => { vivo = false; clearInterval(iv); ev.forEach((e) => window.removeEventListener(e, act)); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth?.token]);
+
+  if (sb && codigo) return <DocenteApp code={codigo} sair={() => setCodigo(null)} />;
+  if (sb && !auth) return <Entrada onDocente={setCodigo} onAluno={(a, save) => {
+    saveAuth(a); setAuth(a);
+    substituir({ ...blank(), ...(save || {}), nick: a.nick });
+  }} />;
+  if (!sb && !s.nick) return <EntradaLocal onOk={(nick) => upd((x) => ({ ...x, nick }))} />;
   const back = () => setTela("home");
   return (
     <div className="app">
       <header>
         <button className="logo" onClick={back}><span className="c" /><span className="q" /><span className="t" /> THD</button>
-        <div className="hud"><b>{s.nick}</b> · {totalPts(s)} pts · 🔥 {streak(s.days)}</div>
+        <div className="hud"><b>{s.nick}</b> · {totalPts(s)} pts · 🔥 {streak(s.days)}{sb && <button className="link" style={{ marginLeft: 8, padding: 0 }} onClick={sair}>Sair</button>}</div>
       </header>
       <main>
         {tela === "home" && <Home s={s} go={setTela} />}
@@ -34,22 +61,76 @@ export default function App() {
         {tela === "teste" && <Teste upd={upd} back={back} />}
         {tela === "perfil" && <Perfil s={s} back={back} />}
         {tela === "rank" && <Rank s={s} back={back} />}
-        {tela === "docente" && <Docente back={back} />}
       </main>
     </div>
   );
 }
 
-function Entrada({ onOk }: { onOk: (n: string) => void }) {
+const ERROS: Record<string, string> = {
+  nao_inscrito: "Esse número não está na lista da turma. Fala com o docente.",
+  pin: "PIN errado.", pin_invalido: "O PIN deve ter 4 a 8 algarismos.",
+  bloqueado: "Demasiadas tentativas. Espera 10 minutos.", codigo: "Código inválido ou bloqueado temporariamente (espera 10 minutos).",
+  rede: "Sem ligação à base de dados. Tenta de novo.", sem_base: "Base de dados não configurada.",
+};
+
+function Entrada({ onAluno, onDocente }: { onAluno: (a: Auth, save: Save | null) => void; onDocente: (code: string) => void }) {
+  const [papel, setPapel] = useState<"aluno" | "docente">("aluno");
+  const [num, setNum] = useState(""); const [pin, setPin] = useState(""); const [nick, setNick] = useState("");
+  const [code, setCode] = useState("");
+  const [primeiro, setPrimeiro] = useState(false);
+  const [msg, setMsg] = useState(""); const [carga, setCarga] = useState(false);
+
+  const entrarAluno = async () => {
+    setCarga(true); setMsg("");
+    const r = await loginAluno(num.trim(), pin, primeiro ? nick.trim() : undefined);
+    setCarga(false);
+    if (r.ok && r.token) return onAluno({ token: r.token, numero: num.trim(), nick: r.nick || nick.trim() }, (r.save as Save | null) || null);
+    if (r.erro === "primeiro_acesso") { setPrimeiro(true); setMsg("Primeiro acesso: escolhe uma alcunha (não uses o teu nome) e um PIN de 4 a 8 algarismos."); return; }
+    setMsg(ERROS[r.erro || ""] || "Não foi possível entrar.");
+  };
+  const entrarDocente = async () => {
+    setCarga(true); setMsg("");
+    const r = await docente.alunos(code);
+    setCarga(false);
+    if (r.ok) onDocente(code); else setMsg(ERROS[r.erro || ""] || "Não foi possível entrar.");
+  };
+  return (
+    <div className="entrada">
+      <div className="formas"><span className="c" /><span className="q" /><span className="t" /></div>
+      <h1>Teoria e História do Design</h1>
+      <div className="chips" style={{ justifyContent: "center" }}>
+        <Chip a={papel === "aluno"} f={() => { setPapel("aluno"); setMsg(""); }}>Sou aluno</Chip>
+        <Chip a={papel === "docente"} f={() => { setPapel("docente"); setMsg(""); }}>Sou docente</Chip>
+      </div>
+      {papel === "aluno" ? (
+        <>
+          <input value={num} maxLength={30} inputMode="numeric" placeholder="Número de aluno" onChange={(e) => { setNum(e.target.value); setPrimeiro(false); }} />
+          <input type="password" value={pin} maxLength={8} inputMode="numeric" placeholder={primeiro ? "Cria um PIN (4 a 8 algarismos)" : "PIN"} onChange={(e) => setPin(e.target.value)} style={{ marginTop: 8 }} />
+          {primeiro && <input value={nick} maxLength={20} placeholder="Alcunha para o ranking (sem nome real)" onChange={(e) => setNick(e.target.value)} style={{ marginTop: 8 }} />}
+          <button className="btn" disabled={carga || !num.trim() || pin.length < 4 || (primeiro && nick.trim().length < 2)} onClick={entrarAluno}>{primeiro ? "Criar acesso" : "Entrar"}</button>
+          <small style={{ display: "block", textAlign: "left" }}>Para acompanhar a tua aprendizagem, o docente vê o teu número de aluno, o tempo de utilização e as tuas respostas. Os outros colegas só veem a tua alcunha no ranking. Se esqueceres o PIN, pede ao docente para o repor.</small>
+        </>
+      ) : (
+        <>
+          <input type="password" value={code} placeholder="Código do docente" onChange={(e) => setCode(e.target.value)} />
+          <button className="btn" disabled={carga || !code} onClick={entrarDocente}>Entrar</button>
+        </>
+      )}
+      {msg && <p className="dica" role="alert">{msg}</p>}
+    </div>
+  );
+}
+
+function EntradaLocal({ onOk }: { onOk: (n: string) => void }) {
   const [v, setV] = useState("");
   return (
     <div className="entrada">
       <div className="formas"><span className="c" /><span className="q" /><span className="t" /></div>
       <h1>Teoria e História do Design</h1>
-      <p>Treina as aulas 1 a 7, sobe no ranking e prepara o teste.</p>
+      <p>Treina as aulas 1 a 7 e prepara o teste.</p>
       <input value={v} maxLength={20} placeholder="A tua alcunha (sem nome real)" onChange={(e) => setV(e.target.value)} />
       <button className="btn" disabled={v.trim().length < 2} onClick={() => onOk(v.trim())}>Entrar</button>
-      <small>Os resultados guardam-se neste dispositivo{sb ? " e entram no ranking da turma." : "."}</small>
+      <small>Modo local: os resultados guardam-se só neste dispositivo.</small>
     </div>
   );
 }
@@ -78,7 +159,6 @@ function Home({ s, go }: { s: Save; go: (t: Tela) => void }) {
       <div className="row">
         <button className="btn ghost" onClick={() => go("perfil")}>O meu perfil</button>
         <button className="btn ghost" onClick={() => go("rank")}>Ranking</button>
-        <button className="btn ghost small" onClick={() => go("docente")}>Docente</button>
       </div>
     </>
   );
@@ -146,7 +226,6 @@ function Perguntas({ titulo, qs, upd, back, tempoTotal, onFim }: { titulo: strin
     const bonus = certo ? Math.max(0, Math.round(5 - seg / 4)) : 0;
     if (certo) setOk((x) => x + 1);
     upd((x) => registar(x, "Conhecimento", certo ? q.nivel * 10 + bonus : 0, certo ? 1 : 0, 1, q.aula, q.id));
-    logAnswer(q.id, certo);
   };
   const seguinte = () => { if (i + 1 >= qs.length) terminar(); else { setI(i + 1); setSel(null); setT0(Date.now()); } };
   return (
@@ -339,17 +418,95 @@ function Rank({ s, back }: { s: Save; back: () => void }) {
 }
 
 // ---------- DOCENTE ----------
-function Docente({ back }: { back: () => void }) {
-  const [code, setCode] = useState("");
-  const [d, setD] = useState<{ qid: string; ok: number; n: number }[] | null | undefined>(undefined);
-  const ver = async () => setD(await teacherStats(code));
-  const ordenado = (d || []).filter((x) => x.n >= 3).map((x) => ({ ...x, pct: Math.round((x.ok / x.n) * 100), q: QUESTOES.find((q) => q.id === x.qid) })).sort((a, b) => a.pct - b.pct);
+const baixar = (nome: string, linhas: (string | number | null)[][]) => {
+  const esc = (v: string | number | null) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const csv = "﻿" + linhas.map((l) => l.map(esc).join(";")).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  a.download = nome; a.click(); URL.revokeObjectURL(a.href);
+};
+const dt = (iso: string | null) => (iso ? new Date(iso).toLocaleString("pt-PT", { dateStyle: "short", timeStyle: "short" }) : "—");
+
+function DocenteApp({ code, sair }: { code: string; sair: () => void }) {
+  const [tab, setTab] = useState<"alunos" | "importar" | "perguntas">("alunos");
+  const [alunos, setAlunos] = useState<AlunoRow[] | null>(null);
+  const [perg, setPerg] = useState<{ qid: string; ok: number; n: number }[]>([]);
+  const [sel, setSel] = useState<AlunoRow | null>(null);
+  const [evs, setEvs] = useState<Evento[]>([]);
+  const [texto, setTexto] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const recarregar = async () => {
+    const r = await docente.alunos(code);
+    if (r.ok) setAlunos(r.data || []); else setMsg(ERROS[r.erro || ""] || "Erro ao carregar.");
+  };
+  useEffect(() => { recarregar(); docente.perguntas(code).then((r) => r.ok && setPerg(r.data || [])); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  useEffect(() => { if (sel) docente.eventos(code, sel.numero).then((r) => setEvs(r.ok ? r.data || [] : [])); else setEvs([]); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [sel?.numero]);
+
+  const importar = async () => {
+    const r = await docente.importar(code, texto);
+    if (r.ok) { setMsg(`${r.importados} aluno(s) importado(s).`); setTexto(""); recarregar(); setTab("alunos"); } else setMsg("Erro ao importar.");
+  };
+  const exportarAlunos = () => baixar("thd_alunos.csv", [
+    ["Número", "Nome", "Turma", "Alcunha", "Ativou acesso", "Último acesso", "Sessões", "Tempo ativo (min)", "Pontos", "Ações", "Testes (nota/20)"],
+    ...(alunos || []).map((a) => [a.numero, a.nome, a.turma, a.nick, a.ativo ? "sim" : "não", a.last_seen, a.sessoes, Math.round(a.segundos / 60), a.pts, a.acoes, a.testes.map((t) => t.nota).join(" | ")]),
+  ]);
+  const exportarEventos = async () => {
+    const r = await docente.eventos(code, null);
+    if (!r.ok) return setMsg("Erro ao exportar.");
+    baixar("thd_acoes.csv", [["Número", "Data/hora", "Tipo", "Aula", "Pergunta", "Certas", "Total", "Pontos", "Sessão"], ...(r.data || []).map((e) => [e.numero, e.ts, e.tipo, e.aula, e.qid, e.ok, e.n, e.pts, e.sessao])]);
+  };
+  const reset = async (a: AlunoRow) => { if (window.confirm(`Repor o PIN do aluno ${a.numero}? Terá de criar um novo no próximo acesso.`)) { await docente.resetPin(code, a.numero); recarregar(); } };
+  const apagar = async (a: AlunoRow) => { if (window.confirm(`Apagar TODOS os dados do aluno ${a.numero} (acesso, progresso e ações)? Não é possível desfazer.`)) { await docente.apagar(code, a.numero); setSel(null); recarregar(); } };
+
+  const ordenado = perg.filter((x) => x.n >= 3).map((x) => ({ ...x, pct: Math.round((x.ok / x.n) * 100), q: QUESTOES.find((q) => q.id === x.qid) })).sort((a, b) => a.pct - b.pct);
+  const total = alunos?.length || 0, ativos = (alunos || []).filter((a) => a.ativo).length;
+
   return (
-    <div><Voltar back={back} /><h2>Painel do docente</h2>
-      <input type="password" placeholder="Código do docente" value={code} onChange={(e) => setCode(e.target.value)} />
-      <button className="btn" onClick={ver}>Ver</button>
-      {d === null && <p className="dica">Código inválido ou base de dados não ligada.</p>}
-      {d && <><h3>Perguntas com mais erros</h3>{ordenado.slice(0, 15).map((x) => <div key={x.qid} className="mapa"><span>Aula {x.q?.aula}: {x.q?.p}</span><div className="barra"><i style={{ width: `${x.pct}%` }} /></div><small>{x.pct}% certas ({x.n})</small></div>)}</>}
+    <div className="app">
+      <header><div className="logo"><span className="c" /><span className="q" /><span className="t" /> THD · Docente</div><div className="hud"><button className="link" onClick={sair}>Sair</button></div></header>
+      <main>
+        <div className="chips">
+          <Chip a={tab === "alunos"} f={() => { setTab("alunos"); setSel(null); }}>Alunos</Chip>
+          <Chip a={tab === "importar"} f={() => setTab("importar")}>Importar lista</Chip>
+          <Chip a={tab === "perguntas"} f={() => setTab("perguntas")}>Perguntas difíceis</Chip>
+        </div>
+        {msg && <p className="dica" role="status">{msg}</p>}
+
+        {tab === "importar" && <div><h2>Importar lista da turma</h2>
+          <p>Uma linha por aluno: <code>número;nome;turma</code> (nome e turma são opcionais; podes colar da folha de cálculo). O nome só é visível para ti. Para minimizar dados, podes importar só os números.</p>
+          <textarea rows={10} style={{ width: "100%", padding: 8, border: "2px solid var(--k)" }} value={texto} onChange={(e) => setTexto(e.target.value)} placeholder={"20240001;;TM1\n20240002;;TM1"} />
+          <button className="btn" disabled={!texto.trim()} onClick={importar}>Importar</button></div>}
+
+        {tab === "perguntas" && <div><h2>Perguntas com mais erros</h2>
+          {ordenado.length === 0 && <p className="dica">Ainda sem dados suficientes (mínimo 3 respostas por pergunta).</p>}
+          {ordenado.slice(0, 20).map((x) => <div key={x.qid} className="mapa"><span>Aula {x.q?.aula}: {x.q?.p}</span><div className="barra"><i style={{ width: `${x.pct}%` }} /></div><small>{x.pct}% certas ({x.n})</small></div>)}</div>}
+
+        {tab === "alunos" && !sel && <div><h2>Alunos</h2>
+          <p className="dica">{total} na lista · {ativos} já ativaram o acesso. O tempo conta só com o ecrã visível e com interação recente.</p>
+          <button className="btn small" onClick={recarregar}>Atualizar</button>
+          <button className="btn small ghost" onClick={exportarAlunos}>Exportar alunos (CSV)</button>
+          <button className="btn small ghost" onClick={exportarEventos}>Exportar ações (CSV)</button>
+          <div style={{ overflowX: "auto", marginTop: 10 }}>
+            <table className="tab"><thead><tr><th>N.º</th><th>Nome</th><th>Alcunha</th><th>Último acesso</th><th>Sessões</th><th>Tempo</th><th>Pontos</th><th>Ações</th></tr></thead>
+              <tbody>{(alunos || []).map((a) => <tr key={a.numero} onClick={() => setSel(a)} style={{ cursor: "pointer", opacity: a.ativo ? 1 : 0.55 }}>
+                <td>{a.numero}</td><td>{a.nome || "—"}</td><td>{a.nick || "—"}</td><td>{dt(a.last_seen)}</td><td>{a.sessoes}</td><td>{fmtTempo(a.segundos)}</td><td>{a.pts}</td><td>{a.acoes}</td></tr>)}</tbody></table>
+          </div></div>}
+
+        {tab === "alunos" && sel && <div>
+          <button className="link" onClick={() => setSel(null)}>← Alunos</button>
+          <h2>{sel.numero}{sel.nome ? ` · ${sel.nome}` : ""}</h2>
+          <p>Alcunha: <b>{sel.nick || "—"}</b> · Último acesso: {dt(sel.last_seen)} · {sel.sessoes} sessões · tempo ativo {fmtTempo(sel.segundos)} · {sel.pts} pts</p>
+          <h3>Acertos por aula</h3>
+          {(Object.keys(AULAS) as unknown as Aula[]).map((k) => { const p = sel.aulas?.[k]; return <div key={k} className="mapa"><span>Aula {k}: {AULAS[k]}</span><div className="barra"><i style={{ width: `${p ?? 0}%` }} /></div><small>{p === undefined ? "por jogar" : `${p}%`}</small></div>; })}
+          <h3>Simulados</h3><p>{sel.testes.length ? sel.testes.map((t) => `${t.nota}/20 (${dt(t.quando)})`).join(" · ") : "Sem simulados."}</p>
+          <h3>Últimas ações</h3>
+          <div style={{ overflowX: "auto" }}><table className="tab"><thead><tr><th>Data/hora</th><th>Atividade</th><th>Aula</th><th>Certas</th><th>Pontos</th></tr></thead>
+            <tbody>{evs.slice(0, 100).map((e, i) => <tr key={i}><td>{dt(e.ts)}</td><td>{e.tipo}</td><td>{e.aula ?? "—"}</td><td>{e.ok}/{e.n}</td><td>{e.pts}</td></tr>)}</tbody></table></div>
+          <button className="btn small ghost" onClick={() => reset(sel)}>Repor PIN</button>
+          <button className="btn small ghost" onClick={() => apagar(sel)}>Apagar dados do aluno</button>
+        </div>}
+      </main>
     </div>
   );
 }

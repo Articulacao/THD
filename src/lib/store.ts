@@ -67,31 +67,91 @@ export const radar = (s: Save) =>
     return { dim: d, valor: val };
   });
 
-// ---- sincronização (silenciosa; falha sem quebrar o jogo) ----
+// ---- autenticação e registo (Supabase) ----
+export type Auth = { token: string; numero: string; nick: string };
+const LA = "thd-auth-v1";
+export const loadAuth = (): Auth | null => { try { return JSON.parse(localStorage.getItem(LA) || "null"); } catch { return null; } };
+export const saveAuth = (a: Auth | null) => { try { if (a) localStorage.setItem(LA, JSON.stringify(a)); else localStorage.removeItem(LA); } catch { /* ignore */ } };
+
+type Res<T = unknown> = { ok: boolean; erro?: string; data?: T; [k: string]: unknown };
+async function rpc<T = unknown>(fn: string, args: Record<string, unknown>): Promise<Res<T>> {
+  if (!sb) return { ok: false, erro: "sem_base" };
+  try {
+    const { data, error } = await sb.rpc(fn, args);
+    if (error) return { ok: false, erro: "rede" };
+    return data as Res<T>;
+  } catch { return { ok: false, erro: "rede" }; }
+}
+
+export async function loginAluno(numero: string, pin: string, nick?: string) {
+  return rpc<never>("aluno_login", { p_numero: numero, p_pin: pin, p_nick: nick ?? null }) as Promise<Res & { token?: string; nick?: string; save?: Save | null }>;
+}
+
+// sessão e tempo ativo
+let tok = ""; let sessao = "";
+export async function iniciarSessao(auth: Auth) {
+  tok = auth.token; sessao = "";
+  const r = (await rpc("sessao_inicio", { p_token: tok })) as Res & { sessao?: string };
+  if (r.ok && r.sessao) sessao = r.sessao;
+  return r.ok;
+}
+export async function ping(seg: number) {
+  if (!tok || !sessao) return;
+  await rpc("sessao_ping", { p_token: tok, p_sessao: sessao, p_seg: seg });
+}
+
+// guarda o progresso (permite continuar noutro dispositivo) e regista as ações
 export async function sync(s: Save) {
-  if (!sb || !s.nick) return;
+  if (!tok) return;
   const dims: Record<string, number> = {};
   Object.entries(s.dims).forEach(([k, v]) => (dims[k] = v.pts));
   const aulas: Record<string, number> = {};
   Object.entries(s.aulas).forEach(([k, v]) => (aulas[k] = v.n ? Math.round((v.ok / v.n) * 100) : 0));
-  try { await sb.rpc("upsert_player", { p_id: s.id, p_nick: s.nick, p_dims: dims, p_aulas: aulas }); } catch { /* offline */ }
+  await rpc("guardar", { p_token: tok, p_save: s, p_dims: dims, p_aulas: aulas });
 }
-export async function logAnswer(qid: string, ok: boolean) {
-  if (!sb) return;
-  try { await sb.rpc("log_answer", { p_qid: qid, p_ok: ok }); } catch { /* ignore */ }
+// compara estados e regista o que mudou (tipo = dimensão do jogo)
+export function eventosDe(a: Save, b: Save) {
+  const evs: { tipo: string; dim: string | null; aula: number | null; qid: string | null; pts: number; ok: number; n: number }[] = [];
+  for (const d of Object.keys(b.dims)) {
+    if (d === "Consistência") continue;
+    const x = a.dims[d] || { pts: 0, ok: 0, n: 0 }; const y = b.dims[d];
+    if (y.n > x.n) {
+      const aula = Object.keys(b.aulas).find((k) => (b.aulas[k]?.n || 0) > (a.aulas[k]?.n || 0));
+      const qid = Object.keys(b.q).find((k) => (b.q[k]?.n || 0) > (a.q[k]?.n || 0));
+      evs.push({ tipo: d, dim: d, aula: aula ? Number(aula) : null, qid: qid || null, pts: y.pts - x.pts, ok: y.ok - x.ok, n: y.n - x.n });
+    }
+  }
+  if (b.tests.length > a.tests.length) { const t = b.tests[b.tests.length - 1]; evs.push({ tipo: "teste", dim: null, aula: null, qid: null, pts: t.nota, ok: t.nota, n: t.total }); }
+  return evs;
 }
+export async function enviarEventos(evs: ReturnType<typeof eventosDe>) {
+  if (!tok || !sessao) return;
+  for (const e of evs) await rpc("evento", { p_token: tok, p_sessao: sessao, p_tipo: e.tipo, p_aula: e.aula, p_dim: e.dim, p_qid: e.qid, p_pts: e.pts, p_ok: e.ok, p_n: e.n });
+}
+export function terminarSessao() { tok = ""; sessao = ""; }
+
 export type Linha = { nick: string; dims: Record<string, number>; total: number };
 export async function ranking(): Promise<Linha[] | null> {
   if (!sb) return null;
   try {
-    const { data, error } = await sb.rpc("get_ranking");
+    const { data, error } = await sb.rpc("ranking");
     if (error) return null;
-    return (data as { nick: string; dims: Record<string, number>; total: number }[]) || [];
+    return (data as Linha[]) || [];
   } catch { return null; }
 }
-export async function teacherStats(code: string) {
-  if (!sb) return null;
-  const { data, error } = await sb.rpc("teacher_stats", { p_code: code });
-  if (error) return null;
-  return data as { qid: string; ok: number; n: number }[];
-}
+
+// ---- docente ----
+export type AlunoRow = {
+  numero: string; nome: string | null; turma: string | null; nick: string | null; ativo: boolean; last_seen: string | null;
+  sessoes: number; segundos: number; pts: number; aulas: Record<string, number>; testes: { quando: string; nota: number; total: number }[]; acoes: number;
+};
+export type Evento = { numero: string; sessao: string; ts: string; tipo: string; aula: number | null; dim: string | null; qid: string | null; pts: number; ok: number; n: number };
+export const docente = {
+  alunos: (code: string) => rpc<AlunoRow[]>("docente_alunos", { p_code: code }),
+  eventos: (code: string, numero: string | null) => rpc<Evento[]>("docente_eventos", { p_code: code, p_numero: numero, p_limite: 5000 }),
+  perguntas: (code: string) => rpc<{ qid: string; ok: number; n: number }[]>("docente_perguntas", { p_code: code }),
+  importar: (code: string, lista: string) => rpc("docente_importar", { p_code: code, p_lista: lista }) as Promise<Res & { importados?: number }>,
+  resetPin: (code: string, numero: string) => rpc("docente_reset_pin", { p_code: code, p_numero: numero }),
+  apagar: (code: string, numero: string) => rpc("docente_apagar", { p_code: code, p_numero: numero }),
+};
+export const fmtTempo = (seg: number) => { const m = Math.round(seg / 60); return m < 60 ? m + " min" : Math.floor(m / 60) + " h " + (m % 60) + " min"; };

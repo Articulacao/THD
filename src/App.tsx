@@ -8,7 +8,20 @@ import { load, blank, cobertura, persist, sync, eventosDe, enviarEventos, loadAu
 import "./styles.css";
 
 type Tela = "home" | "quiz" | "tempo" | "assoc" | "visual" | "sim" | "teste" | "perfil" | "rank";
-const shuffle = <T,>(a: T[]) => [...a].sort(() => Math.random() - 0.5);
+// Fisher-Yates (o sort com random não é uniforme)
+const shuffle = <T,>(a: T[]) => { const r = [...a]; for (let i = r.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [r[i], r[j]] = [r[j], r[i]]; } return r; };
+// baralha a ordem das opções (a resposta certa muda de posição)
+const baralhaOpcoes = (q: Q): Q => { const idx = shuffle(q.o.map((_, i) => i)); return { ...q, o: idx.map((i) => q.o[i]), c: idx.indexOf(q.c) }; };
+// escolhe n perguntas: primeiro as nunca vistas, depois as que mais falhas, sempre com sorteio; no fim baralha a ordem
+function escolher(pool: Q[], hist: Save["q"], n: number): Q[] {
+  const pont = (q: Q) => {
+    const h = hist[q.id];
+    if (!h || !h.n) return 3 + Math.random();
+    return (1 - h.ok / h.n) + Math.random() * 0.9 - Math.min(h.n, 5) * 0.08;
+  };
+  const top = [...pool].map((q) => ({ q, p: pont(q) })).sort((x, y) => y.p - x.p).slice(0, n).map((x) => x.q);
+  return shuffle(top).map(baralhaOpcoes);
+}
 
 export default function App() {
   const [s, setS] = useState<Save>(load);
@@ -170,8 +183,8 @@ const Voltar = ({ back }: { back: () => void }) => <button className="link" onCl
 function Quiz({ s, upd, back }: { s: Save; upd: (f: (x: Save) => Save) => void; back: () => void }) {
   const [aula, setAula] = useState<0 | Aula>(0);
   const [nivel, setNivel] = useState<0 | 1 | 2 | 3>(0);
-  const [on, setOn] = useState(false);
-  if (!on)
+  const [qs, setQs] = useState<Q[] | null>(null);
+  if (!qs)
     return (
       <div>
         <Voltar back={back} /><h2>Quiz relâmpago</h2>
@@ -183,13 +196,10 @@ function Quiz({ s, upd, back }: { s: Save; upd: (f: (x: Save) => Save) => void; 
         {aula !== 0 && <p className="dica">{AULAS[aula]}</p>}
         <label>Dificuldade</label>
         <div className="chips">{[0, 1, 2, 3].map((n) => <Chip key={n} a={nivel === n} f={() => setNivel(n as 0 | 1 | 2 | 3)}>{n === 0 ? "Mista" : ["", "Fácil", "Média", "Difícil"][n]}</Chip>)}</div>
-        <button className="btn" onClick={() => setOn(true)}>Começar</button>
+        <button className="btn" onClick={() => setQs(escolher(QUESTOES.filter((q) => (aula === 0 || q.aula === aula) && (nivel === 0 || q.nivel === nivel)), s.q, 10))}>Começar</button>
       </div>
     );
-  const pool = QUESTOES.filter((q) => (aula === 0 || q.aula === aula) && (nivel === 0 || q.nivel === nivel));
-  // dá prioridade a perguntas que o aluno falha
-  const ordenado = [...pool].sort((a, b) => (s.q[b.id] ? 1 - s.q[b.id].ok / s.q[b.id].n : 0.5) - (s.q[a.id] ? 1 - s.q[a.id].ok / s.q[a.id].n : 0.5) + (Math.random() - 0.5));
-  return <Perguntas titulo="Quiz" qs={ordenado.slice(0, 10)} upd={upd} back={back} />;
+  return <Perguntas titulo="Quiz" qs={qs} upd={upd} back={back} />;
 }
 const Chip = ({ a, f, children }: { a: boolean; f: () => void; children: React.ReactNode }) => <button className={"chip" + (a ? " on" : "")} onClick={f}>{children}</button>;
 
@@ -245,13 +255,12 @@ function Perguntas({ titulo, qs, upd, back, tempoTotal, onFim }: { titulo: strin
 
 // ---------- TESTE ----------
 function Teste({ upd, back }: { upd: (f: (x: Save) => Save) => void; back: () => void }) {
-  const [on, setOn] = useState(false);
-  const qs = useMemo(() => shuffle(QUESTOES).slice(0, 20), []);
-  if (!on)
+  const [qs, setQs] = useState<Q[] | null>(null);
+  if (!qs)
     return (
       <div><Voltar back={back} /><h2>Modo Teste</h2>
         <p>20 perguntas de todas as aulas, 15 minutos, sem explicações durante a prova. A nota é estimada de 0 a 20.</p>
-        <button className="btn" onClick={() => setOn(true)}>Iniciar simulado</button></div>
+        <button className="btn" onClick={() => setQs(shuffle(QUESTOES).slice(0, 20).map(baralhaOpcoes))}>Iniciar simulado</button></div>
     );
   return <Perguntas titulo="Teste" qs={qs} upd={upd} back={back} tempoTotal={15 * 60} onFim={(ok, n) => upd((x) => ({ ...x, tests: [...x.tests, { quando: new Date().toISOString(), nota: Math.round((ok / n) * 200) / 10, total: 20 }] }))} />;
 }

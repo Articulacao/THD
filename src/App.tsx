@@ -4,7 +4,7 @@ import {
   AULAS, QUESTOES, EVENTOS, PISTAS, MOVIMENTOS, CASOS, CENARIOS, DIMENSOES,
   type Q, type Aula, type Dim, type Efeito, type Mov,
 } from "./data/content";
-import { load, blank, persist, sync, eventosDe, enviarEventos, loadAuth, saveAuth, loginAluno, iniciarSessao, ping, terminarSessao, ranking, docente, fmtTempo, registar, totalPts, radar, streak, sb, type Save, type Linha, type Auth, type AlunoRow, type Evento } from "./lib/store";
+import { load, blank, cobertura, persist, sync, eventosDe, enviarEventos, loadAuth, saveAuth, loginAluno, iniciarSessao, ping, terminarSessao, ranking, docente, fmtTempo, registar, totalPts, radar, streak, sb, type Save, type Linha, type Auth, type AlunoRow, type Evento } from "./lib/store";
 import "./styles.css";
 
 type Tela = "home" | "quiz" | "tempo" | "assoc" | "visual" | "sim" | "teste" | "perfil" | "rank";
@@ -385,16 +385,21 @@ function Sim({ upd, back }: { upd: (f: (x: Save) => Save) => void; back: () => v
 // ---------- PERFIL ----------
 function Perfil({ s, back }: { s: Save; back: () => void }) {
   const dados = radar(s);
-  const aulas = (Object.keys(AULAS) as unknown as Aula[]).map((k) => { const a = s.aulas[k]; return { k, pct: a && a.n ? Math.round((a.ok / a.n) * 100) : null, n: a?.n || 0 }; });
+  const cob = cobertura(s.q);
+  const aulas = (Object.keys(AULAS) as unknown as Aula[]).map((k) => ({ k, c: cob[k] || { vistas: 0, total: 0, ok: 0, n: 0 } }));
   return (
     <div><Voltar back={back} /><h2>O meu perfil</h2>
       <div style={{ height: 300 }}><ResponsiveContainer><RadarChart data={dados}><PolarGrid /><PolarAngleAxis dataKey="dim" /><PolarRadiusAxis domain={[0, 100]} tick={false} /><Radar dataKey="valor" stroke="#d62828" fill="#d62828" fillOpacity={0.45} /></RadarChart></ResponsiveContainer></div>
       <h3>Mapa por aula</h3>
-      {aulas.map((a) => (
-        <div key={a.k} className="mapa"><span>Aula {a.k}: {AULAS[a.k]}</span>
-          <div className="barra"><i style={{ width: `${a.pct ?? 0}%`, background: a.pct === null ? "#ccc" : a.pct < 60 ? "#d62828" : a.pct < 80 ? "#f7b500" : "#1d4e89" }} /></div>
-          <small>{a.pct === null ? "por jogar" : `${a.pct}% (${a.n} resp.)`}</small></div>
-      ))}
+      <p className="dica">A barra mostra quanto já viste: perguntas diferentes respondidas em relação ao total da aula.</p>
+      {aulas.map(({ k, c }) => {
+        const pct = c.total ? Math.round((c.vistas / c.total) * 100) : 0, ac = c.n ? Math.round((c.ok / c.n) * 100) : null;
+        return (
+          <div key={k} className="mapa"><span>Aula {k}: {AULAS[k]}</span>
+            <div className="barra"><i style={{ width: `${pct}%` }} /></div>
+            <small>{c.vistas} de {c.total} perguntas{ac === null ? " · por jogar" : ` · ${ac}% certas`}</small></div>
+        );
+      })}
       <h3>Simulados</h3>
       <p>{s.tests.length ? s.tests.map((t) => `${t.nota}/${t.total}`).join(" · ") : "Ainda sem simulados."}</p>
     </div>
@@ -497,8 +502,8 @@ function DocenteApp({ code, sair }: { code: string; sair: () => void }) {
           <button className="link" onClick={() => setSel(null)}>← Alunos</button>
           <h2>{sel.numero}{sel.nome ? ` · ${sel.nome}` : ""}</h2>
           <p>Alcunha: <b>{sel.nick || "—"}</b> · Último acesso: {dt(sel.last_seen)} · {sel.sessoes} sessões · tempo ativo {fmtTempo(sel.segundos)} · {sel.pts} pts</p>
-          <h3>Acertos por aula</h3>
-          {(Object.keys(AULAS) as unknown as Aula[]).map((k) => { const p = sel.aulas?.[k]; return <div key={k} className="mapa"><span>Aula {k}: {AULAS[k]}</span><div className="barra"><i style={{ width: `${p ?? 0}%` }} /></div><small>{p === undefined ? "por jogar" : `${p}%`}</small></div>; })}
+          <h3>Progresso por aula</h3>
+          {(Object.keys(AULAS) as unknown as Aula[]).map((k) => { const c = cobertura(sel.q)[k] || { vistas: 0, total: 0, ok: 0, n: 0 }; const pct = c.total ? Math.round((c.vistas / c.total) * 100) : 0; return <div key={k} className="mapa"><span>Aula {k}: {AULAS[k]}</span><div className="barra"><i style={{ width: `${pct}%` }} /></div><small>{c.vistas} de {c.total} perguntas{c.n ? ` · ${Math.round((c.ok / c.n) * 100)}% certas` : " · por jogar"}</small></div>; })}
           <h3>Simulados</h3><p>{sel.testes.length ? sel.testes.map((t) => `${t.nota}/20 (${dt(t.quando)})`).join(" · ") : "Sem simulados."}</p>
           <h3>Últimas ações</h3>
           <div style={{ overflowX: "auto" }}><table className="tab"><thead><tr><th>Data/hora</th><th>Atividade</th><th>Aula</th><th>Certas</th><th>Pontos</th></tr></thead>

@@ -199,6 +199,7 @@ begin
         (select coalesce(sum(s.segundos), 0) from sessoes s where s.numero = r.numero) as segundos,
         (select coalesce(sum(v::numeric), 0) from jsonb_each_text(coalesce(p.dims, '{}'::jsonb)) as t(k, v)) as pts,
         coalesce(p.aulas, '{}'::jsonb) as aulas,
+        coalesce(p.save -> 'q', '{}'::jsonb) as q,
         coalesce(p.save -> 'tests', '[]'::jsonb) as testes,
         (select count(*) from eventos e where e.numero = r.numero) as acoes
       from roster r left join players p using (numero)

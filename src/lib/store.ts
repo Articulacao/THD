@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { DIMENSOES, type Dim, type Aula } from "../data/content";
+import { DIMENSOES, QUESTOES, type Dim, type Aula } from "../data/content";
 
 const URL = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
@@ -143,7 +143,7 @@ export async function ranking(): Promise<Linha[] | null> {
 // ---- docente ----
 export type AlunoRow = {
   numero: string; nome: string | null; turma: string | null; nick: string | null; ativo: boolean; last_seen: string | null;
-  sessoes: number; segundos: number; pts: number; aulas: Record<string, number>; testes: { quando: string; nota: number; total: number }[]; acoes: number;
+  sessoes: number; segundos: number; pts: number; aulas: Record<string, number>; q?: Record<string, { ok: number; n: number }>; testes: { quando: string; nota: number; total: number }[]; acoes: number;
 };
 export type Evento = { numero: string; sessao: string; ts: string; tipo: string; aula: number | null; dim: string | null; qid: string | null; pts: number; ok: number; n: number };
 export const docente = {
@@ -155,3 +155,16 @@ export const docente = {
   apagar: (code: string, numero: string) => rpc("docente_apagar", { p_code: code, p_numero: numero }),
 };
 export const fmtTempo = (seg: number) => { const m = Math.round(seg / 60); return m < 60 ? m + " min" : Math.floor(m / 60) + " h " + (m % 60) + " min"; };
+
+// cobertura por aula: perguntas diferentes respondidas / total de perguntas da aula
+export type Cob = { vistas: number; total: number; ok: number; n: number };
+export function cobertura(q: Record<string, { ok: number; n: number }> | undefined): Record<number, Cob> {
+  const r: Record<number, Cob> = {};
+  for (const p of QUESTOES) {
+    const c = r[p.aula] || (r[p.aula] = { vistas: 0, total: 0, ok: 0, n: 0 });
+    c.total++;
+    const x = q?.[p.id];
+    if (x && x.n > 0) { c.vistas++; c.ok += x.ok; c.n += x.n; }
+  }
+  return r;
+}
